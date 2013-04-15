@@ -33,7 +33,7 @@ from cinder.openstack.common import log as logging
 from cinder.volume.drivers.san.san import SanISCSIDriver
 from cinder.volume import volume_types
 
-VERSION = 1.2
+VERSION = '1.2'
 LOG = logging.getLogger(__name__)
 
 sf_opts = [
@@ -295,6 +295,7 @@ class SolidFire(SanISCSIDriver):
         implemented in the pre-release version of the SolidFire Cluster.
 
         """
+
         attributes = {}
         qos = {}
 
@@ -305,7 +306,12 @@ class SolidFire(SanISCSIDriver):
         if sf_vol is None:
             raise exception.VolumeNotFound(volume_id=uuid)
 
-        if 'qos' in sf_vol:
+        ctxt = context.get_admin_context()
+        type_id = v_ref['volume_type_id']
+
+        if type_id is not None:
+            qos = self._set_qos_by_volume_type(ctxt, type_id)
+        elif 'qos' in sf_vol:
             qos = sf_vol['qos']
 
         attributes = {'uuid': v_ref['id'],
@@ -370,6 +376,9 @@ class SolidFire(SanISCSIDriver):
         volume_type = volume_types.get_volume_type(ctxt, type_id)
         specs = volume_type.get('extra_specs')
         for key, value in specs.iteritems():
+            if ':' in key:
+                fields = key.split(':')
+                key = fields[1]
             if key in self.sf_qos_keys:
                 qos[key] = int(value)
         return qos
@@ -561,9 +570,10 @@ class SolidFire(SanISCSIDriver):
             results['maxProvisionedSpace'] - results['usedSpace']
 
         data = {}
-        data["volume_backend_name"] = self.__class__.__name__
+        backend_name = self.configuration.safe_get('volume_backend_name')
+        data["volume_backend_name"] = backend_name or self.__class__.__name__
         data["vendor_name"] = 'SolidFire Inc'
-        data["driver_version"] = '1.2'
+        data["driver_version"] = VERSION
         data["storage_protocol"] = 'iSCSI'
 
         data['total_capacity_gb'] = results['maxProvisionedSpace']
