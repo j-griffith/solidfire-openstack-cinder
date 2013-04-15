@@ -324,8 +324,7 @@ class SolidFire(SanISCSIDriver):
 
         params = {'volumeID': int(sf_vol['volumeID']),
                   'name': 'UUID-%s' % v_ref['id'],
-                  'attributes': attributes,
-                  'qos': qos}
+                  'attributes': attributes}
 
         data = self._issue_api_request('CloneVolume', params)
 
@@ -337,6 +336,10 @@ class SolidFire(SanISCSIDriver):
         if model_update is None:
             mesg = _('Failed to get model update from clone')
             raise exception.SolidFireAPIDataException(mesg)
+        new_params = {'volumeID': sf_volume_id,
+                      'qos': qos}
+
+        self._issue_api_request('ModifyVolume', new_params)
 
         return (data, sfaccount, model_update)
 
