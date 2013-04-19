@@ -25,12 +25,12 @@ import string
 import time
 import uuid
 
-from oslo.config import cfg
-
 from cinder import context
 from cinder import exception
+from cinder import flags
+from cinder.openstack.common import cfg
 from cinder.openstack.common import log as logging
-from cinder.volume.drivers.san.san import SanISCSIDriver
+from cinder.volume.san import SanISCSIDriver
 from cinder.volume import volume_types
 
 VERSION = '1.2'
@@ -44,6 +44,9 @@ sf_opts = [
     cfg.BoolOpt('sf_allow_tenant_qos',
                 default=False,
                 help='Allow tenants to specify QOS on create'), ]
+
+FLAGS = flags.FLAGS
+FLAGS.register_opts(sf_opts)
 
 
 class SolidFire(SanISCSIDriver):
@@ -72,12 +75,10 @@ class SolidFire(SanISCSIDriver):
     sf_qos_keys = ['minIOPS', 'maxIOPS', 'burstIOPS']
     cluster_stats = {}
 
-    GB = math.pow(2, 30)
+    GB = 1048576 * 1024
 
     def __init__(self, *args, **kwargs):
             super(SolidFire, self).__init__(*args, **kwargs)
-            self.configuration.append_config_values(sf_opts)
-            self._update_cluster_status()
 
     def _issue_api_request(self, method_name, params):
         """All API requests to SolidFire device go through this method.
@@ -91,12 +92,12 @@ class SolidFire(SanISCSIDriver):
                                    'xMaxClonesPerVolumeExceeded',
                                    'xMaxSnapshotsPerNodeExceeded',
                                    'xMaxClonesPerNodeExceeded']
-        host = self.configuration.san_ip
+        host = FLAGS.san_ip
         # For now 443 is the only port our server accepts requests on
         port = 443
 
-        cluster_admin = self.configuration.san_login
-        cluster_password = self.configuration.san_password
+        cluster_admin = FLAGS.san_login
+        cluster_password = FLAGS.san_password
 
         # NOTE(jdg): We're wrapping a retry loop for a know XDB issue
         # Shows up in very high request rates (ie create 1000 volumes)
@@ -295,7 +296,6 @@ class SolidFire(SanISCSIDriver):
         implemented in the pre-release version of the SolidFire Cluster.
 
         """
-
         attributes = {}
         qos = {}
 
@@ -306,12 +306,7 @@ class SolidFire(SanISCSIDriver):
         if sf_vol is None:
             raise exception.VolumeNotFound(volume_id=uuid)
 
-        ctxt = context.get_admin_context()
-        type_id = v_ref['volume_type_id']
-
-        if type_id is not None:
-            qos = self._set_qos_by_volume_type(ctxt, type_id)
-        elif 'qos' in sf_vol:
+        if 'qos' in sf_vol:
             qos = sf_vol['qos']
 
         attributes = {'uuid': v_ref['id'],
@@ -324,7 +319,8 @@ class SolidFire(SanISCSIDriver):
 
         params = {'volumeID': int(sf_vol['volumeID']),
                   'name': 'UUID-%s' % v_ref['id'],
-                  'attributes': attributes}
+                  'attributes': attributes,
+                  'qos': qos}
 
         data = self._issue_api_request('CloneVolume', params)
 
@@ -336,10 +332,6 @@ class SolidFire(SanISCSIDriver):
         if model_update is None:
             mesg = _('Failed to get model update from clone')
             raise exception.SolidFireAPIDataException(mesg)
-        new_params = {'volumeID': sf_volume_id,
-                      'qos': qos}
-
-        self._issue_api_request('ModifyVolume', new_params)
 
         return (data, sfaccount, model_update)
 
@@ -434,7 +426,7 @@ class SolidFire(SanISCSIDriver):
         attributes = {}
         qos = {}
 
-        if (self.configuration.sf_allow_tenant_qos and
+        if (FLAGS.sf_allow_tenant_qos and
                 volume.get('volume_metadata')is not None):
             qos = self._set_qos_presets(volume)
 
@@ -453,7 +445,7 @@ class SolidFire(SanISCSIDriver):
                   'accountID': None,
                   'sliceCount': slice_count,
                   'totalSize': int(volume['size'] * self.GB),
-                  'enable512e': self.configuration.sf_emulate_512,
+                  'enable512e': FLAGS.sf_emulate_512,
                   'attributes': attributes,
                   'qos': qos}
 
@@ -467,6 +459,7 @@ class SolidFire(SanISCSIDriver):
             volume)
 
         return model
+
 
     def delete_volume(self, volume):
         """Delete SolidFire Volume from device.
@@ -573,8 +566,7 @@ class SolidFire(SanISCSIDriver):
             results['maxProvisionedSpace'] - results['usedSpace']
 
         data = {}
-        backend_name = self.configuration.safe_get('volume_backend_name')
-        data["volume_backend_name"] = backend_name or self.__class__.__name__
+        data["volume_backend_name"] = self.__class__.__name__
         data["vendor_name"] = 'SolidFire Inc'
         data["driver_version"] = VERSION
         data["storage_protocol"] = 'iSCSI'
