@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2011 Justin Santa Barbara
+# Copyright 2013 SolidFire Inc
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -43,7 +43,15 @@ sf_opts = [
 
     cfg.BoolOpt('sf_allow_tenant_qos',
                 default=False,
-                help='Allow tenants to specify QOS on create'), ]
+                help='Allow tenants to specify QOS on create'),
+
+    cfg.StrOpt('sf_account_prefix',
+               default=socket.gethostname(),
+               help='Create SolidFire accounts with this prefix'), ]
+
+
+CONF = cfg.CONF
+CONF.register_opts(sf_opts)
 
 
 class SolidFire(SanISCSIDriver):
@@ -190,7 +198,9 @@ class SolidFire(SanISCSIDriver):
 
     def _get_sf_account_name(self, project_id):
         """Build the SolidFire account name to use."""
-        return ('%s-%s' % (socket.gethostname(), project_id))
+        return '%s%s%s' % (self.configuration.sf_account_prefix,
+                           '-' if self.configuration.sf_account_prefix else '',
+                           project_id)
 
     def _get_sfaccount(self, project_id):
         sf_account_name = self._get_sf_account_name(project_id)
@@ -274,7 +284,7 @@ class SolidFire(SanISCSIDriver):
         if not found_volume:
             LOG.error(_('Failed to retrieve volume SolidFire-'
                         'ID: %s in get_by_account!') % sf_volume_id)
-            raise exception.VolumeNotFound(volume_id=uuid)
+            raise exception.VolumeNotFound(volume_id=sf_volume_id)
 
         model_update = {}
         # NOTE(john-griffith): SF volumes are always at lun 0
@@ -295,7 +305,6 @@ class SolidFire(SanISCSIDriver):
         implemented in the pre-release version of the SolidFire Cluster.
 
         """
-
         attributes = {}
         qos = {}
 
@@ -304,42 +313,48 @@ class SolidFire(SanISCSIDriver):
 
         sf_vol = self._get_sf_volume(src_uuid, params)
         if sf_vol is None:
-            raise exception.VolumeNotFound(volume_id=uuid)
+            raise exception.VolumeNotFound(volume_id=src_uuid)
 
-        ctxt = context.get_admin_context()
-        type_id = v_ref['volume_type_id']
-
-        if type_id is not None:
-            qos = self._set_qos_by_volume_type(ctxt, type_id)
-        elif 'qos' in sf_vol:
-            qos = sf_vol['qos']
-
-        attributes = {'uuid': v_ref['id'],
-                      'is_clone': 'True',
-                      'src_uuid': 'src_uuid'}
-
-        if qos:
-            for k, v in qos.items():
-                            attributes[k] = str(v)
+        if src_project_id != v_ref['project_id']:
+            sfaccount = self._create_sfaccount(v_ref['project_id'])
 
         params = {'volumeID': int(sf_vol['volumeID']),
                   'name': 'UUID-%s' % v_ref['id'],
-                  'attributes': attributes}
-
+                  'newAccountID': sfaccount['accountID']}
         data = self._issue_api_request('CloneVolume', params)
 
         if (('result' not in data) or ('volumeID' not in data['result'])):
             raise exception.SolidFireAPIDataException(data=data)
-
         sf_volume_id = data['result']['volumeID']
+
+        if (self.configuration.sf_allow_tenant_qos and
+                v_ref.get('volume_metadata')is not None):
+            qos = self._set_qos_presets(v_ref)
+
+        ctxt = context.get_admin_context()
+        type_id = v_ref['volume_type_id']
+        if type_id is not None:
+            qos = self._set_qos_by_volume_type(ctxt, type_id)
+
+        # NOTE(jdg): all attributes are copied via clone, need to do an update
+        # to set any that were provided
+        params = {'volumeID': sf_volume_id}
+
+        attributes = {'uuid': v_ref['id'],
+                      'is_clone': 'True',
+                      'src_uuid': src_uuid}
+        if qos:
+            params['qos'] = qos
+            for k, v in qos.items():
+                attributes[k] = str(v)
+
+        params['attributes'] = attributes
+        data = self._issue_api_request('ModifyVolume', params)
+
         model_update = self._get_model_info(sfaccount, sf_volume_id)
         if model_update is None:
             mesg = _('Failed to get model update from clone')
             raise exception.SolidFireAPIDataException(mesg)
-        new_params = {'volumeID': sf_volume_id,
-                      'qos': qos}
-
-        self._issue_api_request('ModifyVolume', new_params)
 
         return (data, sfaccount, model_update)
 
